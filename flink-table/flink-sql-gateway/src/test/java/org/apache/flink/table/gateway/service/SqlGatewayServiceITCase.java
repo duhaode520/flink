@@ -32,23 +32,14 @@ import org.apache.flink.table.api.config.TableConfigOptions;
 import org.apache.flink.table.api.internal.TableEnvironmentInternal;
 import org.apache.flink.table.api.internal.TableResultInternal;
 import org.apache.flink.table.catalog.CatalogBaseTable.TableKind;
-import org.apache.flink.table.catalog.Column;
-import org.apache.flink.table.catalog.GenericInMemoryCatalog;
-import org.apache.flink.table.catalog.ObjectIdentifier;
-import org.apache.flink.table.catalog.ResolvedCatalogTable;
-import org.apache.flink.table.catalog.ResolvedCatalogView;
-import org.apache.flink.table.catalog.ResolvedSchema;
+import org.apache.flink.table.catalog.*;
 import org.apache.flink.table.data.GenericRowData;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.data.StringData;
 import org.apache.flink.table.functions.FunctionIdentifier;
 import org.apache.flink.table.gateway.api.operation.OperationHandle;
 import org.apache.flink.table.gateway.api.operation.OperationStatus;
-import org.apache.flink.table.gateway.api.results.FunctionInfo;
-import org.apache.flink.table.gateway.api.results.OperationInfo;
-import org.apache.flink.table.gateway.api.results.ResultSet;
-import org.apache.flink.table.gateway.api.results.ResultSetImpl;
-import org.apache.flink.table.gateway.api.results.TableInfo;
+import org.apache.flink.table.gateway.api.results.*;
 import org.apache.flink.table.gateway.api.session.SessionEnvironment;
 import org.apache.flink.table.gateway.api.session.SessionHandle;
 import org.apache.flink.table.gateway.api.utils.MockedEndpointVersion;
@@ -56,7 +47,6 @@ import org.apache.flink.table.gateway.api.utils.SqlGatewayException;
 import org.apache.flink.table.gateway.service.operation.OperationManager;
 import org.apache.flink.table.gateway.service.result.NotReadyResult;
 import org.apache.flink.table.gateway.service.session.SessionManagerImpl;
-import org.apache.flink.table.gateway.service.utils.IgnoreExceptionHandler;
 import org.apache.flink.table.gateway.service.utils.SqlExecutionException;
 import org.apache.flink.table.gateway.service.utils.SqlGatewayServiceExtension;
 import org.apache.flink.table.planner.plan.utils.JavaUserDefinedAggFunctions;
@@ -66,12 +56,11 @@ import org.apache.flink.table.planner.utils.TableFunc0;
 import org.apache.flink.test.junit5.InjectClusterClient;
 import org.apache.flink.test.junit5.MiniClusterExtension;
 import org.apache.flink.test.util.TestUtils;
+import org.apache.flink.testutils.executor.TestExecutorExtension;
 import org.apache.flink.util.CollectionUtil;
 import org.apache.flink.util.UserClassLoaderJarTestUtils;
-import org.apache.flink.util.concurrent.ExecutorThreadFactory;
 import org.apache.flink.util.function.RunnableWithException;
 import org.apache.flink.util.function.ThrowingConsumer;
-
 import org.assertj.core.api.Condition;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Order;
@@ -85,44 +74,25 @@ import java.io.File;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.Duration;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Map;
-import java.util.Random;
-import java.util.Set;
-import java.util.concurrent.Callable;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.FutureTask;
-import java.util.concurrent.RejectedExecutionException;
-import java.util.concurrent.ThreadFactory;
+import java.util.*;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.apache.flink.core.testutils.FlinkAssertions.anyCauseMatches;
 import static org.apache.flink.core.testutils.FlinkAssertions.assertThatChainOfCauses;
 import static org.apache.flink.table.api.ResultKind.SUCCESS_WITH_CONTENT;
 import static org.apache.flink.table.api.internal.StaticResultProvider.SIMPLE_ROW_DATA_TO_STRING_CONVERTER;
-import static org.apache.flink.table.functions.FunctionKind.AGGREGATE;
-import static org.apache.flink.table.functions.FunctionKind.OTHER;
-import static org.apache.flink.table.functions.FunctionKind.SCALAR;
+import static org.apache.flink.table.functions.FunctionKind.*;
 import static org.apache.flink.table.gateway.api.results.ResultSet.ResultType.PAYLOAD;
-import static org.apache.flink.table.gateway.service.utils.SqlGatewayServiceTestUtil.awaitOperationTermination;
-import static org.apache.flink.table.gateway.service.utils.SqlGatewayServiceTestUtil.createInitializedSession;
-import static org.apache.flink.table.gateway.service.utils.SqlGatewayServiceTestUtil.fetchResults;
+import static org.apache.flink.table.gateway.service.utils.SqlGatewayServiceTestUtil.*;
 import static org.apache.flink.table.utils.UserDefinedFunctions.GENERATED_LOWER_UDF_CLASS;
 import static org.apache.flink.table.utils.UserDefinedFunctions.GENERATED_LOWER_UDF_CODE;
-import static org.apache.flink.types.RowKind.DELETE;
-import static org.apache.flink.types.RowKind.INSERT;
-import static org.apache.flink.types.RowKind.UPDATE_AFTER;
+import static org.apache.flink.types.RowKind.*;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.AssertionsForClassTypes.assertThatThrownBy;
 
 /** ITCase for {@link SqlGatewayServiceImpl}. */
 public class SqlGatewayServiceITCase {
-
     @RegisterExtension
     @Order(1)
     public static final MiniClusterExtension MINI_CLUSTER =
@@ -136,6 +106,11 @@ public class SqlGatewayServiceITCase {
     public static final SqlGatewayServiceExtension SQL_GATEWAY_SERVICE_EXTENSION =
             new SqlGatewayServiceExtension(MINI_CLUSTER::getClientConfiguration);
 
+    @RegisterExtension
+    @Order(3)
+    public static final TestExecutorExtension<ExecutorService> EXECUTOR_EXTENSION =
+            new TestExecutorExtension<>(() -> Executors.newScheduledThreadPool(4));
+
     private static SessionManagerImpl sessionManager;
     private static SqlGatewayServiceImpl service;
 
@@ -143,9 +118,7 @@ public class SqlGatewayServiceITCase {
             SessionEnvironment.newBuilder()
                     .setSessionEndpointVersion(MockedEndpointVersion.V1)
                     .build();
-    private final ThreadFactory threadFactory =
-            new ExecutorThreadFactory(
-                    "SqlGatewayService Test Pool", IgnoreExceptionHandler.INSTANCE);
+    ExecutorService executorService = EXECUTOR_EXTENSION.getExecutor();
 
     @BeforeAll
     static void setUp() {
@@ -773,12 +746,9 @@ public class SqlGatewayServiceITCase {
                     service.getSession(sessionHandle)
                             .getOperationManager()
                             .getOperation(operationHandle));
-            threadFactory
-                    .newThread(() -> service.cancelOperation(sessionHandle, operationHandle))
-                    .start();
-            threadFactory
-                    .newThread(() -> service.closeOperation(sessionHandle, operationHandle))
-                    .start();
+
+            executorService.execute(() -> service.cancelOperation(sessionHandle, operationHandle));
+            executorService.execute(() -> service.closeOperation(sessionHandle, operationHandle));
         }
 
         CommonTestUtils.waitUtil(
@@ -800,16 +770,14 @@ public class SqlGatewayServiceITCase {
         int submitThreadsNum = 100;
         CountDownLatch latch = new CountDownLatch(submitThreadsNum);
         for (int i = 0; i < submitThreadsNum; i++) {
-            threadFactory
-                    .newThread(
-                            () -> {
-                                try {
-                                    submitDefaultOperation(sessionHandle, () -> {});
-                                } finally {
-                                    latch.countDown();
-                                }
-                            })
-                    .start();
+            executorService.execute(
+                    () -> {
+                        try {
+                            submitDefaultOperation(sessionHandle, () -> {});
+                        } finally {
+                            latch.countDown();
+                        }
+                    });
         }
         manager.close();
         latch.await();
@@ -823,17 +791,15 @@ public class SqlGatewayServiceITCase {
         CountDownLatch terminateRunning = new CountDownLatch(1);
         SessionHandle sessionHandle = service.openSession(defaultSessionEnvironment);
         for (int i = 0; i < count; i++) {
-            threadFactory
-                    .newThread(
-                            () ->
-                                    service.submitOperation(
-                                            sessionHandle,
-                                            () -> {
-                                                startRunning.countDown();
-                                                terminateRunning.await();
-                                                return getDefaultResultSet();
-                                            }))
-                    .start();
+            executorService.execute(
+                    () ->
+                            service.submitOperation(
+                                    sessionHandle,
+                                    () -> {
+                                        startRunning.countDown();
+                                        terminateRunning.await();
+                                        return getDefaultResultSet();
+                                    }));
         }
         startRunning.await();
         service.getSession(sessionHandle).getOperationManager().close();
@@ -1034,8 +1000,7 @@ public class SqlGatewayServiceITCase {
                             schemaFetcherIsRunning.countDown();
                             return service.getOperationResultSchema(sessionHandle, operationHandle);
                         });
-        threadFactory.newThread(task).start();
-
+        executorService.execute(task);
         schemaFetcherIsRunning.await();
         operationIsRunning.countDown();
         validator.accept(task);
@@ -1048,16 +1013,14 @@ public class SqlGatewayServiceITCase {
             Condition<String> condition) {
 
         List<RowData> actual = new ArrayList<>();
-        threadFactory
-                .newThread(
-                        () -> {
-                            try {
-                                cancelOrClose.run();
-                            } catch (Exception e) {
-                                // ignore
-                            }
-                        })
-                .start();
+        executorService.execute(
+                () -> {
+                    try {
+                        cancelOrClose.run();
+                    } catch (Exception e) {
+                        // ignore
+                    }
+                });
 
         assertThatThrownBy(
                         () -> {
