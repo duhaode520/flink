@@ -31,6 +31,7 @@ import org.apache.flink.core.execution.SavepointFormatType;
 import org.apache.flink.metrics.Gauge;
 import org.apache.flink.metrics.MetricGroup;
 import org.apache.flink.queryablestate.KvStateID;
+import org.apache.flink.runtime.OperatorIDPair;
 import org.apache.flink.runtime.accumulators.AccumulatorSnapshot;
 import org.apache.flink.runtime.checkpoint.CheckpointCoordinator;
 import org.apache.flink.runtime.checkpoint.CheckpointException;
@@ -234,8 +235,7 @@ public abstract class SchedulerBase implements SchedulerNG, CheckpointScheduling
 
         this.operatorCoordinatorHandler =
                 new DefaultOperatorCoordinatorHandler(executionGraph, this::handleGlobalFailure);
-        operatorCoordinatorHandler.initializeOperatorCoordinators(
-                this.mainThreadExecutor, jobManagerJobMetricGroup);
+        operatorCoordinatorHandler.initializeOperatorCoordinators(this.mainThreadExecutor);
 
         this.exceptionHistory =
                 new BoundedFIFOQueue<>(
@@ -402,6 +402,8 @@ public abstract class SchedulerBase implements SchedulerNG, CheckpointScheduling
     protected void restoreState(
             final Set<ExecutionVertexID> vertices, final boolean isGlobalRecovery)
             throws Exception {
+        vertexEndOfDataListener.restoreVertices(vertices);
+
         final CheckpointCoordinator checkpointCoordinator =
                 executionGraph.getCheckpointCoordinator();
 
@@ -1078,6 +1080,21 @@ public abstract class SchedulerBase implements SchedulerNG, CheckpointScheduling
                         .getCheckpointCoordinatorConfiguration()
                         .isEnableCheckpointsAfterTasksFinish()) {
             vertexEndOfDataListener.recordTaskEndOfData(executionAttemptID);
+            if (vertexEndOfDataListener.areAllTasksOfJobVertexEndOfData(
+                    executionAttemptID.getJobVertexId())) {
+                List<OperatorIDPair> operatorIDPairs =
+                        executionGraph
+                                .getJobVertex(executionAttemptID.getJobVertexId())
+                                .getOperatorIDs();
+                CheckpointCoordinator checkpointCoordinator =
+                        executionGraph.getCheckpointCoordinator();
+                if (checkpointCoordinator != null) {
+                    for (OperatorIDPair operatorIDPair : operatorIDPairs) {
+                        checkpointCoordinator.setIsProcessingBacklog(
+                                operatorIDPair.getGeneratedOperatorID(), false);
+                    }
+                }
+            }
             if (vertexEndOfDataListener.areAllTasksEndOfData()) {
                 triggerCheckpoint(CheckpointType.CONFIGURED);
             }
@@ -1091,5 +1108,10 @@ public abstract class SchedulerBase implements SchedulerNG, CheckpointScheduling
     @VisibleForTesting
     JobID getJobId() {
         return jobGraph.getJobID();
+    }
+
+    @VisibleForTesting
+    VertexEndOfDataListener getVertexEndOfDataListener() {
+        return vertexEndOfDataListener;
     }
 }

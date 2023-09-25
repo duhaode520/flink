@@ -691,6 +691,13 @@ function setup_flink_slf4j_metric_reporter() {
   set_config_key "metrics.reporter.slf4j.filter.includes" "*:${METRIC_NAME_PATTERN}"
 }
 
+function get_job_exceptions {
+  local job_id=$1
+  local json=$(curl ${CURL_SSL_ARGS} -s ${REST_PROTOCOL}://${NODENAME}:8081/jobs/${job_id}/exceptions)
+
+  echo ${json}
+}
+
 function get_job_metric {
   local job_id=$1
   local metric_name=$2
@@ -935,8 +942,12 @@ function extract_job_id_from_job_submission_return() {
 
 kill_test_watchdog() {
     local watchdog_pid=$(cat $TEST_DATA_DIR/job_watchdog.pid)
-    echo "Stopping job timeout watchdog (with pid=$watchdog_pid)"
-    kill $watchdog_pid
+    if kill -0 $watchdog_pid > /dev/null 2>&1; then
+        echo "Stopping job timeout watchdog (with pid=$watchdog_pid)"
+        kill $watchdog_pid
+    else
+        echo "No watchdog process with pid=$watchdog_pid present, anymore. No action required to clean the watchdog process up."
+    fi
 }
 
 #
